@@ -1,0 +1,34 @@
+# .NET build outputs
+**/bin/
+**/obj/
+artifacts/
+TestResults/
+
+# Local publish output and user data
+/app/
+**/data/
+*.log
+*.tmp
+
+# IDE and user-specific files
+.vs/
+.idea/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Debug and coverage artifacts
+*.pdb
+*.coverage
+*.coveragexml
+
+# Local secrets
+.env
+.env.*
+*.secrets.json
+
+# OS metadata
+Thumbs.db
+Desktop.ini
+.DS_Store

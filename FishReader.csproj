@@ -10,8 +10,14 @@
     <RootNamespace>FishReader</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <PublishSingleFile>false</PublishSingleFile>
+    <PublishTrimmed>false</PublishTrimmed>
   </PropertyGroup>
   <ItemGroup>
     <Compile Remove="SmokeTests\**\*.cs" />
   </ItemGroup>
+  <Target Name="RejectUnstableSingleFilePublish" BeforeTargets="Publish"
+          Condition="'$(PublishSingleFile)' == 'true'">
+    <Error Text="FishReader 使用 WPF 原生窗口钩子，当前不支持单文件发布。请使用自包含文件夹发布。" />
+  </Target>
 </Project>

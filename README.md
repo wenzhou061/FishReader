@@ -31,6 +31,7 @@ FishReader 是一个面向 Windows 的轻量 TXT 悬浮阅读器。程序默认�
 - “弱化行尾标点”会降低每个显示行末尾标点的透明度，不修改原文；鼠标停留在设置旁的 `?` 上会显示深色悬浮说明。
 - “定位阅读位置”显示当前行数和百分比，支持百分比预览、向前/向后搜索；确认后才会跳转并立即保存。
 - 配置和阅读进度保存在 `app\data\config.json`。
+- 运行异常优先记录在 `app\data\app.log`；若程序目录不可写，则记录到 `%LOCALAPPDATA%\FishReader\app.log`。
 
 ## 当前范围
 
@@ -56,22 +57,23 @@ dotnet format .\FishReader.csproj --verify-no-changes
 dotnet list .\FishReader.csproj package --vulnerable --include-transitive
 ```
 
-生成 Windows x64 自包含单文件程序：
+生成 Windows x64 自包含文件夹版本：
 
 ```powershell
 dotnet publish .\FishReader.csproj `
   -c Release `
   -r win-x64 `
   --self-contained true `
-  -p:PublishSingleFile=true `
   -o .\app
 ```
+
+请保留 `app` 中的全部运行库文件，不要只复制 `FishReader.exe`。当前 .NET 10 的 WPF 单文件发布存在原生窗口组件兼容风险，项目会主动拒绝 `PublishSingleFile=true`。
 
 ## 仓库和发布文件
 
 - `bin`、`obj`、`app` 和各级 `data` 目录均为本地生成物或用户数据，不进入 Git。
 - `app\data\config.json` 可能包含本机 TXT 完整路径、阅读进度、窗口位置和快捷键设置，禁止提交。
-- 自包含程序体积超过 GitHub 普通 Git 文件限制，应作为 GitHub Release 附件发布，不应提交到源码历史。
+- 发布目录体积可能超过 GitHub 普通 Git 文件限制；分发时应将整个 `app` 目录压缩为 Release 附件，不应提交到源码历史。
 
 ## License
 

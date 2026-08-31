@@ -412,15 +412,6 @@ internal sealed class ReaderApplication : System.Windows.Application
 
     private void WriteLog(string value)
     {
-        try
-        {
-            Directory.CreateDirectory(_store.DataDirectory);
-            File.AppendAllText(Path.Combine(_store.DataDirectory, "app.log"),
-                $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {value}{Environment.NewLine}");
-        }
-        catch
-        {
-            // Logging must never prevent startup or shutdown.
-        }
+        CrashLogger.Write(value);
     }
 }

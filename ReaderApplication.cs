@@ -13,6 +13,7 @@ internal sealed class ReaderApplication : System.Windows.Application
     private readonly ConfigStore _store = new();
     private readonly EventWaitHandle _activationEvent;
     private readonly DispatcherTimer _foregroundTimer = new() { Interval = TimeSpan.FromMilliseconds(140) };
+    private readonly DispatcherTimer _saveTimer = new() { Interval = TimeSpan.FromMilliseconds(800) };
     private AppConfig _config = null!;
     private OverlayWindow _overlay = null!;
     private Forms.NotifyIcon _tray = null!;
@@ -21,6 +22,7 @@ internal sealed class ReaderApplication : System.Windows.Application
     private SettingsWindow? _settings;
     private IntPtr _boundWindow;
     private int _firstVisibleLine;
+    private int? _returnOffset;
     private bool _exiting;
     private readonly List<string> _pendingNotices = [];
     private RegisteredWaitHandle? _activationWait;
@@ -52,6 +54,7 @@ internal sealed class ReaderApplication : System.Windows.Application
             Dispatcher.BeginInvoke(ShowSettings), null, Timeout.Infinite, false);
         _foregroundTimer.Tick += CheckBoundWindow;
         _foregroundTimer.Start();
+        _saveTimer.Tick += (_, _) => SaveState();
     }
 
     protected override void OnExit(ExitEventArgs e)
@@ -59,6 +62,7 @@ internal sealed class ReaderApplication : System.Windows.Application
         if (!_exiting)
             SaveState();
         _activationWait?.Unregister(null);
+        _saveTimer.Stop();
         _tray?.Dispose();
         _trayIcon?.Dispose();
         base.OnExit(e);
@@ -89,6 +93,7 @@ internal sealed class ReaderApplication : System.Windows.Application
             _config.FilePath = document.FilePath;
             _config.EncodingName = document.EncodingName;
             _config.CurrentOffset = 0;
+            _returnOffset = null;
             ReflowDocument(0);
             SaveState();
             ShowNotice($"已打开 {Path.GetFileName(dialog.FileName)}（{document.EncodingName}）");
@@ -164,9 +169,44 @@ internal sealed class ReaderApplication : System.Windows.Application
         => _document?.PreviewAt(offset) ?? "尚未打开 TXT 文件。";
 
     public void JumpToOffset(int offset)
+        => JumpToOffset(offset, rememberCurrent: true);
+
+    public bool ReturnToPreviousLocation()
+    {
+        if (_returnOffset is not { } target || _document is null)
+            return false;
+        _returnOffset = CurrentOffset;
+        JumpToOffset(target, rememberCurrent: false);
+        return true;
+    }
+
+    public bool JumpToNextChapter()
+    {
+        var currentLineEnd = _document is { Lines.Count: > 0 }
+            ? _document.Lines[Math.Clamp(_firstVisibleLine, 0, _document.Lines.Count - 1)].End
+            : CurrentOffset;
+        var target = _document?.FindNextChapter(currentLineEnd) ?? -1;
+        if (target < 0)
+            return false;
+        JumpToOffset(target);
+        return true;
+    }
+
+    public bool JumpToPreviousChapter()
+    {
+        var target = _document?.FindPreviousChapter(CurrentOffset) ?? -1;
+        if (target < 0)
+            return false;
+        JumpToOffset(target);
+        return true;
+    }
+
+    private void JumpToOffset(int offset, bool rememberCurrent)
     {
         if (_document is null || _document.Lines.Count == 0)
             return;
+        if (rememberCurrent)
+            _returnOffset = CurrentOffset;
         _firstVisibleLine = _document.FindLineIndexAtOffset(offset);
         PersistProgress();
         RenderOverlay();
@@ -215,7 +255,7 @@ internal sealed class ReaderApplication : System.Windows.Application
             return;
         }
 
-        _document.Reflow(_config.Width - 16, _config.FontSize);
+        _document.Reflow(_config.Width - 16, _config.FontSize, _config.FontFamily, _config.FontWeightName);
         _firstVisibleLine = _document.FindLineIndexAtOffset(preserveOffset);
         PersistProgress();
         RenderOverlay();
@@ -305,7 +345,7 @@ internal sealed class ReaderApplication : System.Windows.Application
         _firstVisibleLine = Math.Clamp(_firstVisibleLine + delta, 0, _document.Lines.Count - 1);
         PersistProgress();
         RenderOverlay();
-        SaveState();
+        ScheduleSave();
     }
 
     private void RenderOverlay()
@@ -386,6 +426,7 @@ internal sealed class ReaderApplication : System.Windows.Application
 
     private void SaveState()
     {
+        _saveTimer.Stop();
         try
         {
             PersistProgress();
@@ -395,6 +436,12 @@ internal sealed class ReaderApplication : System.Windows.Application
         {
             WriteLog($"保存配置失败：{ex}");
         }
+    }
+
+    private void ScheduleSave()
+    {
+        _saveTimer.Stop();
+        _saveTimer.Start();
     }
 
     private void ShowNotice(string message)

@@ -3,6 +3,9 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Text.RegularExpressions;
+using System.Windows;
+using System.Windows.Media;
 
 namespace FishReader;
 
@@ -12,8 +15,14 @@ internal sealed class TextDocument
 {
     private static readonly char[] StrongStops = ['。', '！', '？', '!', '?', '；', ';'];
     private static readonly char[] WeakStops = ['，', ',', '、', '：', ':'];
+    private const string ForbiddenAtLineStart = "、。，．？！；：,.;:!?)]}）〕］】〉》」』〗〙〛’”〞々…—～";
+    private const string ForbiddenAtLineEnd = "([{（〔［【〈《「『〖〘〚‘“";
+    private static readonly Regex ChapterPattern = new(
+        @"^[\t \u3000]{0,4}(?:第[零〇一二三四五六七八九十百千万两\d]{1,12}[章回卷节部篇]|序章|楔子|后记)(?:[^\r\n]{0,40})?\r?$",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.Multiline);
 
     private readonly string _text;
+    private readonly int[] _chapterOffsets;
     private List<TextLine> _lines = [];
 
     private TextDocument(string path, string encodingName, string text)
@@ -21,6 +30,7 @@ internal sealed class TextDocument
         FilePath = path;
         EncodingName = encodingName;
         _text = text;
+        _chapterOffsets = ChapterPattern.Matches(text).Select(match => match.Index).ToArray();
     }
 
     public string FilePath { get; }
@@ -36,9 +46,11 @@ internal sealed class TextDocument
         return new TextDocument(path, encoding.WebName, text.Replace('\0', ' '));
     }
 
-    public void Reflow(double availableWidth, double fontSize, string fontFamily = "Segoe UI")
+    public void Reflow(double availableWidth, double fontSize, string fontFamily = "Segoe UI",
+        string fontWeightName = "Normal")
     {
-        var width = Math.Max(80, availableWidth);
+        var width = Math.Max(80, availableWidth) - 2;
+        var measurer = new GlyphWidthMeasurer(fontFamily, fontWeightName, fontSize);
         var lines = new List<TextLine>();
         var position = 0;
 
@@ -48,27 +60,20 @@ internal sealed class TextDocument
             if (position >= _text.Length)
                 break;
 
-            var paragraphEnd = FindLineBreak(position);
-            var hardLimit = paragraphEnd >= 0 ? paragraphEnd : _text.Length;
-            while (position < hardLimit)
-            {
-                var fitEnd = FindFittingEnd(position, hardLimit, width, fontSize);
-                if (fitEnd <= position)
-                    fitEnd = Math.Min(position + 1, hardLimit);
+            var fitEnd = FindFittingEnd(position, _text.Length, width, measurer);
+            if (fitEnd <= position)
+                fitEnd = Math.Min(position + 1, _text.Length);
 
-                var chosenEnd = ChooseSemanticBreak(position, fitEnd);
-                if (chosenEnd <= position)
-                    chosenEnd = fitEnd;
+            var chosenEnd = ChooseSemanticBreak(position, fitEnd, width, measurer);
+            chosenEnd = ApplyChineseLineBreakRules(position, chosenEnd, _text.Length);
+            if (chosenEnd <= position)
+                chosenEnd = fitEnd;
 
-                var display = CollapseWhitespace(_text[position..chosenEnd]).Trim();
-                if (display.Length > 0)
-                    lines.Add(new TextLine(position, chosenEnd, display));
+            var display = CollapseWhitespace(_text[position..chosenEnd]).Trim();
+            if (display.Length > 0)
+                lines.Add(new TextLine(position, chosenEnd, display));
 
-                position = chosenEnd;
-            }
-
-            if (paragraphEnd >= 0 && position >= paragraphEnd)
-                position = SkipLineBreak(position);
+            position = chosenEnd;
         }
 
         _lines = lines;
@@ -118,6 +123,22 @@ internal sealed class TextDocument
         return _text.LastIndexOf(value, start, StringComparison.CurrentCultureIgnoreCase);
     }
 
+    public int FindNextChapter(int afterOffset)
+    {
+        var index = Array.BinarySearch(_chapterOffsets, Math.Clamp(afterOffset + 1, 0, _text.Length));
+        if (index < 0)
+            index = ~index;
+        return index < _chapterOffsets.Length ? _chapterOffsets[index] : -1;
+    }
+
+    public int FindPreviousChapter(int beforeOffset)
+    {
+        var index = Array.BinarySearch(_chapterOffsets, Math.Clamp(beforeOffset - 1, 0, _text.Length));
+        if (index < 0)
+            index = ~index - 1;
+        return index >= 0 ? _chapterOffsets[index] : -1;
+    }
+
     public string PreviewAt(int offset, int radius = 90)
     {
         if (_text.Length == 0)
@@ -134,66 +155,49 @@ internal sealed class TextDocument
         return position;
     }
 
-    private int FindLineBreak(int start)
+    private int FindFittingEnd(int start, int limit, double width, GlyphWidthMeasurer measurer)
     {
-        for (var i = start; i < _text.Length; i++)
-        {
-            if (_text[i] is '\r' or '\n')
-                return i;
-        }
-        return -1;
-    }
-
-    private int SkipLineBreak(int position)
-    {
-        while (position < _text.Length && _text[position] is '\r' or '\n')
-            position++;
-        return position;
-    }
-
-    private int FindFittingEnd(int start, int limit, double width, double fontSize)
-    {
-        var capacity = width / Math.Max(fontSize, 1);
         var used = 0d;
         var position = start;
         while (position < limit)
         {
-            var next = CharacterWidthUnits(_text[position]);
-            if (position > start && used + next > capacity)
+            if (char.IsWhiteSpace(_text[position]))
+            {
+                var whitespaceEnd = FindWhitespaceEnd(position, limit, out var containsLineBreak,
+                    out var containsVisibleSpace);
+                var previous = PreviousNonWhitespace(position - 1, start);
+                var next = whitespaceEnd < limit ? _text[whitespaceEnd] : '\0';
+                var whitespaceWidth = ShouldDisplaySpace(previous >= start ? _text[previous] : '\0', next,
+                    containsLineBreak, containsVisibleSpace) ? measurer.SpaceWidth : 0;
+                if (position > start && used + whitespaceWidth > width)
+                    break;
+                used += whitespaceWidth;
+                position = whitespaceEnd;
+                continue;
+            }
+
+            var nextWidth = measurer.WidthOf(_text[position]);
+            if (position > start && used + nextWidth > width)
                 break;
-            used += next;
+            used += nextWidth;
             position++;
         }
         return position;
     }
 
-    private static double CharacterWidthUnits(char value)
+    private int ChooseSemanticBreak(int start, int fitEnd, double width, GlyphWidthMeasurer measurer)
     {
-        if (char.IsWhiteSpace(value))
-            return 0.35;
-        if (value <= 0x7F)
-        {
-            if (char.IsLetterOrDigit(value))
-                return char.IsUpper(value) ? 0.68 : 0.56;
-            return 0.45;
-        }
-        return 1.0;
-    }
-
-    private int ChooseSemanticBreak(int start, int fitEnd)
-    {
-        var length = fitEnd - start;
-        if (length < 4)
+        if (fitEnd - start < 4)
             return fitEnd;
 
-        var strongFloor = start + (int)(length * 0.5);
+        var strongFloor = FindWidthPosition(start, fitEnd, width * 0.82, measurer);
         for (var i = fitEnd - 1; i >= strongFloor; i--)
         {
             if (StrongStops.Contains(_text[i]))
                 return i + 1;
         }
 
-        var weakFloor = start + (int)(length * 0.68);
+        var weakFloor = FindWidthPosition(start, fitEnd, width * 0.90, measurer);
         for (var i = fitEnd - 1; i >= weakFloor; i--)
         {
             if (WeakStops.Contains(_text[i]) || char.IsWhiteSpace(_text[i]))
@@ -203,25 +207,159 @@ internal sealed class TextDocument
         return fitEnd;
     }
 
+    private int FindWidthPosition(int start, int limit, double targetWidth, GlyphWidthMeasurer measurer)
+    {
+        var used = 0d;
+        var position = start;
+        while (position < limit)
+        {
+            if (char.IsWhiteSpace(_text[position]))
+            {
+                position = FindWhitespaceEnd(position, limit, out _, out _);
+                continue;
+            }
+            used += measurer.WidthOf(_text[position]);
+            if (used >= targetWidth)
+                return position;
+            position++;
+        }
+        return position;
+    }
+
+    private int ApplyChineseLineBreakRules(int start, int end, int limit)
+    {
+        var next = NextNonWhitespace(end, limit);
+        if (next < limit && ForbiddenAtLineStart.Contains(_text[next]))
+        {
+            var previous = PreviousNonWhitespace(end - 1, start);
+            while (previous > start && ForbiddenAtLineStart.Contains(_text[previous]))
+                previous = PreviousNonWhitespace(previous - 1, start);
+            if (previous > start)
+                end = previous;
+        }
+
+        var last = PreviousNonWhitespace(end - 1, start);
+        if (last > start && ForbiddenAtLineEnd.Contains(_text[last]))
+            end = last;
+        return end;
+    }
+
+    private int FindWhitespaceEnd(int position, int limit, out bool containsLineBreak,
+        out bool containsVisibleSpace)
+    {
+        containsLineBreak = false;
+        containsVisibleSpace = false;
+        while (position < limit && char.IsWhiteSpace(_text[position]))
+        {
+            containsLineBreak |= _text[position] is '\r' or '\n';
+            containsVisibleSpace |= _text[position] is ' ' or '\t';
+            position++;
+        }
+        return position;
+    }
+
+    private int PreviousNonWhitespace(int position, int floor)
+    {
+        while (position >= floor && char.IsWhiteSpace(_text[position]))
+            position--;
+        return position;
+    }
+
+    private int NextNonWhitespace(int position, int limit)
+    {
+        while (position < limit && char.IsWhiteSpace(_text[position]))
+            position++;
+        return position;
+    }
+
     private static string CollapseWhitespace(string value)
     {
         var builder = new StringBuilder(value.Length);
-        var pendingSpace = false;
-        foreach (var c in value)
+        for (var i = 0; i < value.Length; i++)
         {
-            if (char.IsWhiteSpace(c))
+            var c = value[i];
+            if (!char.IsWhiteSpace(c))
             {
-                pendingSpace = builder.Length > 0;
+                builder.Append(c);
                 continue;
             }
-            if (pendingSpace)
+
+            var containsLineBreak = false;
+            var containsVisibleSpace = false;
+            while (i < value.Length && char.IsWhiteSpace(value[i]))
             {
-                builder.Append(' ');
-                pendingSpace = false;
+                containsLineBreak |= value[i] is '\r' or '\n';
+                containsVisibleSpace |= value[i] is ' ' or '\t';
+                i++;
             }
-            builder.Append(c);
+            var next = i < value.Length ? value[i] : '\0';
+            var previous = builder.Length > 0 ? builder[^1] : '\0';
+            if (ShouldDisplaySpace(previous, next, containsLineBreak, containsVisibleSpace))
+                builder.Append(' ');
+            i--;
         }
         return builder.ToString();
+    }
+
+    private static bool ShouldDisplaySpace(char previous, char next, bool containsLineBreak,
+        bool containsVisibleSpace)
+    {
+        if (previous == '\0' || next == '\0' || ForbiddenAtLineStart.Contains(next))
+            return false;
+        if (!containsLineBreak)
+            return containsVisibleSpace;
+        return IsAsciiWord(previous) && IsAsciiWord(next);
+    }
+
+    private static bool IsAsciiWord(char value)
+        => value <= 0x7F && (char.IsLetterOrDigit(value) || value is '_' or '-' or '\'' or '"');
+
+    private sealed class GlyphWidthMeasurer
+    {
+        private readonly GlyphTypeface? _glyphTypeface;
+        private readonly double _fontSize;
+        private readonly Dictionary<char, double> _cache = [];
+
+        public GlyphWidthMeasurer(string fontFamily, string fontWeightName, double fontSize)
+        {
+            _fontSize = Math.Max(1, fontSize);
+            var weight = fontWeightName switch
+            {
+                "Medium" => FontWeights.Medium,
+                "SemiBold" => FontWeights.SemiBold,
+                _ => FontWeights.Normal
+            };
+            try
+            {
+                var typeface = new Typeface(new FontFamily(fontFamily), FontStyles.Normal, weight,
+                    FontStretches.Normal);
+                if (typeface.TryGetGlyphTypeface(out var glyphTypeface))
+                    _glyphTypeface = glyphTypeface;
+            }
+            catch
+            {
+                _glyphTypeface = null;
+            }
+        }
+
+        public double SpaceWidth => WidthOf(' ');
+
+        public double WidthOf(char value)
+        {
+            if (_cache.TryGetValue(value, out var width))
+                return width;
+
+            if (_glyphTypeface is not null && _glyphTypeface.CharacterToGlyphMap.TryGetValue(value, out var glyph))
+                width = _glyphTypeface.AdvanceWidths[glyph] * _fontSize;
+            else if (value <= 0x7F)
+                width = _fontSize * (char.IsLetterOrDigit(value) ? 0.58 : 0.45);
+            else
+                width = _fontSize;
+
+            width = Math.Max(0, width);
+            _cache[value] = width;
+            return width;
+        }
     }
 
     private static (Encoding Encoding, int PreambleLength) DetectEncoding(byte[] bytes)

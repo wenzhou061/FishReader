@@ -26,6 +26,23 @@ try
     Assert(utf8.Lines.All(line => !string.IsNullOrWhiteSpace(line.Text)), "no empty lines");
     Assert(utf8.Find("光明依旧照耀", 0) >= 0, "text search");
     Assert(utf8.PreviewAt(utf8.OffsetFromPercent(50)).Length > 0, "percent preview");
+    Assert(utf8.FindNextChapter(0) < 0, "no later chapter");
+
+    var malformedPath = Path.Combine(testDirectory, "malformed-wrap.txt");
+    var malformedSource =
+        "第一章 开始\r\n　　少许地方裸露着齿轮和轴承\r\n。\r\n　　近书桌的右墙角堆放着煤炉。\r\n第二章 继续\r\n　　新的内容。";
+    File.WriteAllText(malformedPath, malformedSource, new UTF8Encoding(false));
+    var malformed = TextDocument.Load(malformedPath);
+    malformed.Reflow(150, 16, "Microsoft YaHei UI", "Normal");
+    Assert(malformed.Lines.All(line => line.Text != "。"), "orphan punctuation repaired");
+    Assert(malformed.Lines.All(line => line.Text.Length == 0 || !"、。，．？！；：".Contains(line.Text[0])),
+        "forbidden punctuation avoided at line start");
+    Assert(string.Concat(malformed.Lines.Select(line => line.Text)).Contains("齿轮和轴承。近书桌"),
+        "ordinary source line breaks flattened");
+    Assert(string.Concat(malformed.Lines.SelectMany(line => line.Text).Where(c => !char.IsWhiteSpace(c))) ==
+           string.Concat(malformedSource.Where(c => !char.IsWhiteSpace(c))), "reflow preserves all visible text");
+    var secondChapter = malformed.FindNextChapter(0);
+    Assert(secondChapter > 0 && malformed.FindPreviousChapter(secondChapter) == 0, "chapter navigation");
 
     var gbPath = Path.Combine(testDirectory, "gb18030.txt");
     File.WriteAllBytes(gbPath, Encoding.GetEncoding("GB18030").GetBytes(sample));
@@ -64,6 +81,12 @@ try
         var external = TextDocument.Load(args[0]);
         external.Reflow(284, 16);
         stopwatch.Stop();
+        Assert(external.Lines.All(line => line.Text.Length == 0 ||
+               !"、。，．？！；：,.;:!?)]}）〕］】〉》」』".Contains(line.Text[0])),
+            "external text respects line-start punctuation rules");
+        Assert(external.Lines.All(line => line.Text.Length == 0 ||
+               !"([{（〔［【〈《「『".Contains(line.Text[^1])),
+            "external text respects line-end punctuation rules");
         Console.WriteLine($"EXTERNAL: {external.Length} chars, {external.Lines.Count} lines in {stopwatch.ElapsedMilliseconds} ms, " +
                           $"encoding={external.EncodingName}");
     }

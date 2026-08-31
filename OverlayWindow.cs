@@ -23,6 +23,7 @@ internal sealed class OverlayWindow : Window
     private readonly Border _cornerGuide = new();
     private readonly TextBlock _sizeText = new();
     private readonly Border _sizeBadge = new();
+    private readonly List<TextBlock> _textRows = [];
     private readonly Action<ReaderHotKey> _hotKeyHandler;
     private readonly Action<string> _registrationError;
     private readonly Action _layoutChanged;
@@ -50,8 +51,15 @@ internal sealed class OverlayWindow : Window
         ResizeMode = ResizeMode.NoResize;
         ShowActivated = false;
         Focusable = false;
+        UseLayoutRounding = true;
+        SnapsToDevicePixels = true;
         Left = config.WindowLeft;
         Top = config.WindowTop;
+
+        _root.UseLayoutRounding = true;
+        _root.SnapsToDevicePixels = true;
+        _rows.UseLayoutRounding = true;
+        _rows.SnapsToDevicePixels = true;
 
         _layoutBorder.BorderThickness = new Thickness(1);
         _layoutBorder.BorderBrush = Brushes.Transparent;
@@ -93,6 +101,7 @@ internal sealed class OverlayWindow : Window
                 Hide();
             }
         };
+        DpiChanged += (_, _) => ApplyGeometry();
 
         ApplyGeometry();
     }
@@ -106,41 +115,55 @@ internal sealed class OverlayWindow : Window
         _source = HwndSource.FromHwnd(_handle);
         _source.AddHook(WindowProc);
         ApplyExtendedStyles();
+        ApplyGeometry();
         Register(ReaderHotKey.Boss, _config.BossHotKey);
     }
 
     public void ApplyGeometry()
     {
+        var scale = Math.Max(1, VisualTreeHelper.GetDpi(this).DpiScaleX);
+        var lineHeight = SnapToPixel(_config.FontSize * 1.48, scale);
+        _config.Width = SnapToPixel(_config.Width, scale);
         Width = _config.Width;
-        Height = Math.Max(36, 8 + (_config.VisibleRows * ((_config.FontSize * 1.48) + _config.RowGap)));
+        Height = Math.Max(36, SnapToPixel(8 + (_config.VisibleRows * (lineHeight + _config.RowGap)), scale));
         var maximumLeft = SystemParameters.VirtualScreenLeft + Math.Max(0, SystemParameters.VirtualScreenWidth - Width);
         var maximumTop = SystemParameters.VirtualScreenTop + Math.Max(0, SystemParameters.VirtualScreenHeight - Height);
-        Left = Math.Clamp(_config.WindowLeft, SystemParameters.VirtualScreenLeft, maximumLeft);
-        Top = Math.Clamp(_config.WindowTop, SystemParameters.VirtualScreenTop, maximumTop);
+        Left = SnapToPixel(Math.Clamp(_config.WindowLeft, SystemParameters.VirtualScreenLeft, maximumLeft), scale);
+        Top = SnapToPixel(Math.Clamp(_config.WindowTop, SystemParameters.VirtualScreenTop, maximumTop), scale);
         _config.WindowLeft = Left;
         _config.WindowTop = Top;
     }
 
     public void Render(IReadOnlyList<string> lines)
     {
-        _rows.Children.Clear();
+        EnsureTextRows();
         var color = ParseBrush(_config.UseDarkPageTheme ? _config.DarkPageTextColor : _config.LightPageTextColor);
+        var scale = Math.Max(1, VisualTreeHelper.GetDpi(this).DpiScaleX);
+        var lineHeight = SnapToPixel(_config.FontSize * 1.48, scale);
 
-        foreach (var line in lines.Take(_config.VisibleRows))
+        for (var index = 0; index < _textRows.Count; index++)
         {
-            var text = new TextBlock
+            var text = _textRows[index];
+            if (index >= lines.Count)
             {
-                FontFamily = new FontFamily(_config.FontFamily),
-                FontSize = _config.FontSize,
-                FontWeight = ParseFontWeight(_config.FontWeightName),
-                Foreground = color,
-                Opacity = _config.TextOpacity,
-                TextWrapping = TextWrapping.NoWrap,
-                TextTrimming = TextTrimming.CharacterEllipsis,
-                Margin = new Thickness(2, _config.RowGap / 2, 2, _config.RowGap / 2),
-                IsHitTestVisible = false
-            };
+                text.Visibility = Visibility.Collapsed;
+                text.Text = string.Empty;
+                continue;
+            }
+
+            var line = lines[index];
+            text.Visibility = Visibility.Visible;
+            text.FontFamily = new FontFamily(_config.FontFamily);
+            text.FontSize = _config.FontSize;
+            text.FontWeight = ParseFontWeight(_config.FontWeightName);
+            text.Foreground = color;
+            text.Opacity = _config.TextOpacity;
+            text.LineHeight = lineHeight;
+            text.LineStackingStrategy = LineStackingStrategy.BlockLineHeight;
+            text.Margin = new Thickness(2, _config.RowGap / 2, 2, _config.RowGap / 2);
+            text.Inlines.Clear();
             TextOptions.SetTextFormattingMode(text, TextFormattingMode.Display);
+            TextOptions.SetTextHintingMode(text, TextHintingMode.Fixed);
             if (_config.FadeTrailingPunctuation && line.Length > 1 && IsTrailingPunctuation(line[^1]))
             {
                 var punctuationBrush = color.Clone();
@@ -152,9 +175,35 @@ internal sealed class OverlayWindow : Window
             {
                 text.Text = line;
             }
-            _rows.Children.Add(text);
         }
     }
+
+    private void EnsureTextRows()
+    {
+        while (_textRows.Count < _config.VisibleRows)
+        {
+            var text = new TextBlock
+            {
+                TextWrapping = TextWrapping.NoWrap,
+                TextTrimming = TextTrimming.None,
+                IsHitTestVisible = false,
+                UseLayoutRounding = true,
+                SnapsToDevicePixels = true
+            };
+            _textRows.Add(text);
+            _rows.Children.Add(text);
+        }
+
+        while (_textRows.Count > _config.VisibleRows)
+        {
+            var last = _textRows[^1];
+            _rows.Children.Remove(last);
+            _textRows.RemoveAt(_textRows.Count - 1);
+        }
+    }
+
+    private static double SnapToPixel(double value, double scale)
+        => Math.Round(value * scale) / scale;
 
     public void SetLayoutMode(bool enabled)
     {

@@ -186,6 +186,9 @@ internal sealed class SettingsWindow : Window
         buttons.Children.Add(ActionButton("查找上一处", (_, _) => FindPrevious()));
         buttons.Children.Add(ActionButton("查找下一处", (_, _) => FindNext()));
         buttons.Children.Add(ActionButton("确认跳转", (_, _) => ApplyLocation(), primary: true));
+        buttons.Children.Add(ActionButton("上一章", (_, _) => JumpChapter(next: false)));
+        buttons.Children.Add(ActionButton("下一章", (_, _) => JumpChapter(next: true)));
+        buttons.Children.Add(ActionButton("返回跳转前", (_, _) => ReturnToPreviousLocation()));
         locateBody.Children.Add(buttons);
 
         _preview.TextWrapping = TextWrapping.Wrap;
@@ -543,6 +546,37 @@ internal sealed class SettingsWindow : Window
         _app.JumpToOffset(_candidateOffset);
         RefreshDocumentState();
         SetStatus("阅读位置已更新并保存。", success: true);
+    }
+
+    private void JumpChapter(bool next)
+    {
+        if (_app.Document is null)
+        {
+            SetStatus("请先打开 TXT 文件。");
+            return;
+        }
+
+        var moved = next ? _app.JumpToNextChapter() : _app.JumpToPreviousChapter();
+        if (!moved)
+        {
+            SetStatus(next ? "后面没有识别到章节标题。" : "前面没有识别到章节标题。");
+            return;
+        }
+
+        RefreshDocumentState();
+        SetStatus(next ? "已跳到下一章。" : "已跳到上一章。", success: true);
+    }
+
+    private void ReturnToPreviousLocation()
+    {
+        if (!_app.ReturnToPreviousLocation())
+        {
+            SetStatus("当前没有可返回的跳转位置。");
+            return;
+        }
+
+        RefreshDocumentState();
+        SetStatus("已返回跳转前的位置。", success: true);
     }
 
     private void UpdateLocationPreview()
